@@ -1,0 +1,42 @@
+spring:
+  task:
+    scheduling:
+      pool:
+        size: 2
+  servlet:
+    multipart:
+      max-file-size: 120MB
+      max-request-size: 120MB
+      file-size-threshold: 0B
+  mail:
+    host: ${SMARTEVAL_SMTP_HOST:}
+    port: ${SMARTEVAL_SMTP_PORT:587}
+    username: ${SMARTEVAL_SMTP_USER:}
+    password: ${SMARTEVAL_SMTP_PASSWORD:}
+    properties:
+      mail.smtp.auth: ${SMARTEVAL_SMTP_AUTH:true}
+      mail.smtp.starttls.enable: ${SMARTEVAL_SMTP_STARTTLS:true}
+      mail.smtp.connectiontimeout: 4000
+      mail.smtp.timeout: 4000
+      mail.smtp.writetimeout: 4000
+  datasource:
+    url: ${SMARTEVAL_DATABASE_URL:jdbc:mysql://localhost:3306/smarteval?connectionTimeZone=UTC&forceConnectionTimeZoneToSession=true}
+    username: ${SMARTEVAL_DATABASE_USER:smarteval}
+    password: ${SMARTEVAL_DATABASE_PASSWORD:}
+  flyway:
+    locations: classpath:db/migration
+  jackson:
+    deserialization:
+      fail-on-trailing-tokens: true
+server:
+  port: ${SMARTEVAL_PORT:8080}
+  error:
+    include-message: never
+smarteval:
+  secret: ${SMARTEVAL_SESSION_SECRET:}
+  secure-cookies: ${SMARTEVAL_SECURE_COOKIES:true}
+  public-origin: ${SMARTEVAL_PUBLIC_ORIGIN:https://localhost}
+  bootstrap-user: ${SMARTEVAL_BOOTSTRAP_USER:}
+  bootstrap-password: ${SMARTEVAL_BOOTSTRAP_PASSWORD:}
+  blob-directory: ${SMARTEVAL_BLOB_DIRECTORY:./data/objects}
+  worker-enabled: ${SMARTEVAL_WORKER_ENABLED:true}

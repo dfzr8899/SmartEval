@@ -1,0 +1,6 @@
+**
+!services/
+!services/intelligence/
+!services/intelligence/requirements*.txt
+!services/intelligence/smarteval_ai/
+!services/intelligence/smarteval_ai/*.py

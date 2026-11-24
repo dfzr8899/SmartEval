@@ -1,0 +1,215 @@
+x-object-environment: &object-environment
+  SMARTEVAL_BLOB_DIRECTORY: /objects
+  SMARTEVAL_S3_ENDPOINT: ${SMARTEVAL_S3_ENDPOINT:-}
+  SMARTEVAL_S3_BUCKET: ${SMARTEVAL_S3_BUCKET:-}
+  SMARTEVAL_S3_REGION: ${SMARTEVAL_S3_REGION:-us-east-1}
+  SMARTEVAL_S3_ACCESS_KEY: ${SMARTEVAL_S3_ACCESS_KEY:-}
+  SMARTEVAL_S3_SECRET_KEY: ${SMARTEVAL_S3_SECRET_KEY:-}
+
+services:
+  mysql:
+    image: mysql:8.4.8
+    restart: unless-stopped
+    environment:
+      MYSQL_DATABASE: smarteval
+      MYSQL_USER: smarteval
+      MYSQL_PASSWORD: ${SMARTEVAL_DATABASE_PASSWORD:?set SMARTEVAL_DATABASE_PASSWORD}
+      MYSQL_RANDOM_ROOT_PASSWORD: "yes"
+    volumes: [database:/var/lib/mysql]
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "127.0.0.1", "--silent"]
+      interval: 4s
+      timeout: 3s
+      retries: 30
+    networks: [backend]
+
+  objects-init:
+    image: alpine:3.22
+    user: "0:0"
+    command: ["chown", "1000:1000", "/objects"]
+    volumes: [objects:/objects]
+    network_mode: none
+
+  judge:
+    build: ./services/judge
+    restart: unless-stopped
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    read_only: true
+    pids_limit: 256
+    mem_limit: 1g
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,mode=1777,size=128m
+      - /work:rw,exec,nosuid,mode=1777,size=256m
+    environment:
+      JUDGE_AUTH_TOKEN: ${SMARTEVAL_JUDGE_TOKEN:-${SMARTEVAL_INTERNAL_TOKEN:?set SMARTEVAL_INTERNAL_TOKEN}}
+      JUDGE_WORKERS: "4"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:2358/health', timeout=2)"]
+      interval: 5s
+      timeout: 3s
+      retries: 15
+      start_period: 3s
+    networks: [backend]
+
+  business:
+    build: ./services/business
+    restart: unless-stopped
+    depends_on:
+      mysql: {condition: service_healthy}
+      intelligence: {condition: service_healthy}
+      judge: {condition: service_healthy}
+      objects-init: {condition: service_completed_successfully}
+    environment:
+      <<: *object-environment
+      SMARTEVAL_DATABASE_URL: jdbc:mysql://mysql:3306/smarteval?connectionTimeZone=UTC&forceConnectionTimeZoneToSession=true
+      SMARTEVAL_DATABASE_USER: smarteval
+      SMARTEVAL_DATABASE_PASSWORD: ${SMARTEVAL_DATABASE_PASSWORD:?set SMARTEVAL_DATABASE_PASSWORD}
+      SMARTEVAL_SESSION_SECRET: ${SMARTEVAL_SESSION_SECRET:?set SMARTEVAL_SESSION_SECRET}
+      SMARTEVAL_SECURE_COOKIES: ${SMARTEVAL_SECURE_COOKIES:-false}
+      SMARTEVAL_PUBLIC_ORIGIN: ${SMARTEVAL_PUBLIC_ORIGIN:-http://localhost:8088}
+      SMARTEVAL_WORKER_ENABLED: ${SMARTEVAL_WORKER_ENABLED:-true}
+      SMARTEVAL_WORKER_CONCURRENCY: ${SMARTEVAL_WORKER_CONCURRENCY:-8}
+      SMARTEVAL_ASSET_RETENTION_HOURS: ${SMARTEVAL_ASSET_RETENTION_HOURS:-24}
+      SMARTEVAL_SIMILARITY_THRESHOLD: ${SMARTEVAL_SIMILARITY_THRESHOLD:-0.60}
+      SMARTEVAL_WEBHOOK_ALLOW_LOOPBACK: ${SMARTEVAL_WEBHOOK_ALLOW_LOOPBACK:-false}
+      SMARTEVAL_BOOTSTRAP_USER: ${SMARTEVAL_BOOTSTRAP_USER:-}
+      SMARTEVAL_BOOTSTRAP_PASSWORD: ${SMARTEVAL_BOOTSTRAP_PASSWORD:-}
+      SMARTEVAL_AI_URL: http://intelligence:8000
+      SMARTEVAL_INTERNAL_TOKEN: ${SMARTEVAL_INTERNAL_TOKEN:?set SMARTEVAL_INTERNAL_TOKEN}
+      # Defaults to the built-in 5-language sandbox container (override with external Judge0 CE in .env if desired).
+      SMARTEVAL_JUDGE_URL: ${SMARTEVAL_JUDGE_URL:-http://judge:2358}
+      SMARTEVAL_JUDGE_TOKEN: ${SMARTEVAL_JUDGE_TOKEN:-${SMARTEVAL_INTERNAL_TOKEN:?set SMARTEVAL_INTERNAL_TOKEN}}
+      SMARTEVAL_JUDGE_LANGUAGES: ${SMARTEVAL_JUDGE_LANGUAGES:-CPP=54,JAVA=62,PYTHON=71,C=50,JAVASCRIPT=63}
+      SMARTEVAL_JUDGE_MEMORY_KIB: ${SMARTEVAL_JUDGE_MEMORY_KIB:-262144}
+      SMARTEVAL_JUDGE_CPU_TIME_MS: ${SMARTEVAL_JUDGE_CPU_TIME_MS:-3000}
+      SMARTEVAL_JUDGE_WALL_TIME_MS: ${SMARTEVAL_JUDGE_WALL_TIME_MS:-5000}
+      SMARTEVAL_JUDGE_POLL_SECONDS: ${SMARTEVAL_JUDGE_POLL_SECONDS:-25}
+      SMARTEVAL_SMTP_HOST: ${SMARTEVAL_SMTP_HOST:-}
+      SMARTEVAL_SMTP_FROM: ${SMARTEVAL_SMTP_FROM:-}
+      SMARTEVAL_SMTP_PORT: ${SMARTEVAL_SMTP_PORT:-587}
+      SMARTEVAL_SMTP_USER: ${SMARTEVAL_SMTP_USER:-}
+      SMARTEVAL_SMTP_PASSWORD: ${SMARTEVAL_SMTP_PASSWORD:-}
+      SMARTEVAL_SMTP_AUTH: ${SMARTEVAL_SMTP_AUTH:-true}
+      SMARTEVAL_SMTP_STARTTLS: ${SMARTEVAL_SMTP_STARTTLS:-true}
+    healthcheck:
+      test: ["CMD", "bash", "-ec", "exec 3<>/dev/tcp/127.0.0.1/8080; printf 'GET /health HTTP/1.1\\r\\nHost: localhost\\r\\nConnection: close\\r\\n\\r\\n' >&3; IFS= read -r status <&3; [[ $$status == 'HTTP/1.1 204 '* ]]"]
+      interval: 2s
+      timeout: 2s
+      retries: 30
+      start_period: 2s
+    volumes: [objects:/objects]
+    networks: [backend, external]
+
+  intelligence:
+    build:
+      context: .
+      dockerfile: services/intelligence/Dockerfile
+    restart: unless-stopped
+    depends_on:
+      objects-init: {condition: service_completed_successfully}
+    environment:
+      <<: *object-environment
+      SMARTEVAL_INTERNAL_TOKEN: ${SMARTEVAL_INTERNAL_TOKEN:?set SMARTEVAL_INTERNAL_TOKEN}
+      SMARTEVAL_MODEL_BASE_URL: ${SMARTEVAL_MODEL_BASE_URL:-}
+      SMARTEVAL_MODEL_NAME: ${SMARTEVAL_MODEL_NAME:-}
+      SMARTEVAL_MODEL_API_KEY: ${SMARTEVAL_MODEL_API_KEY:-}
+      SMARTEVAL_MODEL_RESPONSE_FORMAT: ${SMARTEVAL_MODEL_RESPONSE_FORMAT:-}
+      SMARTEVAL_MODEL_TOKEN_LIMIT_FIELD: ${SMARTEVAL_MODEL_TOKEN_LIMIT_FIELD:-}
+      SMARTEVAL_MODEL_EXTRA_BODY_JSON: ${SMARTEVAL_MODEL_EXTRA_BODY_JSON:-}
+      SMARTEVAL_REVIEW_MODE: ${SMARTEVAL_REVIEW_MODE:-revise}
+      SMARTEVAL_OCR_LANGUAGES: ${SMARTEVAL_OCR_LANGUAGES:-chi_sim+eng}
+      SMARTEVAL_QUESTION_READER_MODEL: ${SMARTEVAL_QUESTION_READER_MODEL:-}
+      SMARTEVAL_QUESTION_READER_BASE_URL: ${SMARTEVAL_QUESTION_READER_BASE_URL:-}
+      SMARTEVAL_QUESTION_READER_API_KEY: ${SMARTEVAL_QUESTION_READER_API_KEY:-}
+      SMARTEVAL_QUESTION_READER_RESPONSE_FORMAT: ${SMARTEVAL_QUESTION_READER_RESPONSE_FORMAT:-}
+      SMARTEVAL_QUESTION_READER_TOKEN_LIMIT_FIELD: ${SMARTEVAL_QUESTION_READER_TOKEN_LIMIT_FIELD:-}
+      SMARTEVAL_QUESTION_READER_EXTRA_BODY_JSON: ${SMARTEVAL_QUESTION_READER_EXTRA_BODY_JSON:-}
+      SMARTEVAL_RUBRIC_DESIGNER_MODEL: ${SMARTEVAL_RUBRIC_DESIGNER_MODEL:-}
+      SMARTEVAL_RUBRIC_DESIGNER_BASE_URL: ${SMARTEVAL_RUBRIC_DESIGNER_BASE_URL:-}
+      SMARTEVAL_RUBRIC_DESIGNER_API_KEY: ${SMARTEVAL_RUBRIC_DESIGNER_API_KEY:-}
+      SMARTEVAL_RUBRIC_DESIGNER_RESPONSE_FORMAT: ${SMARTEVAL_RUBRIC_DESIGNER_RESPONSE_FORMAT:-}
+      SMARTEVAL_RUBRIC_DESIGNER_TOKEN_LIMIT_FIELD: ${SMARTEVAL_RUBRIC_DESIGNER_TOKEN_LIMIT_FIELD:-}
+      SMARTEVAL_RUBRIC_DESIGNER_EXTRA_BODY_JSON: ${SMARTEVAL_RUBRIC_DESIGNER_EXTRA_BODY_JSON:-}
+      SMARTEVAL_GRADER_MODEL: ${SMARTEVAL_GRADER_MODEL:-}
+      SMARTEVAL_GRADER_BASE_URL: ${SMARTEVAL_GRADER_BASE_URL:-}
+      SMARTEVAL_GRADER_API_KEY: ${SMARTEVAL_GRADER_API_KEY:-}
+      SMARTEVAL_GRADER_RESPONSE_FORMAT: ${SMARTEVAL_GRADER_RESPONSE_FORMAT:-}
+      SMARTEVAL_GRADER_TOKEN_LIMIT_FIELD: ${SMARTEVAL_GRADER_TOKEN_LIMIT_FIELD:-}
+      SMARTEVAL_GRADER_EXTRA_BODY_JSON: ${SMARTEVAL_GRADER_EXTRA_BODY_JSON:-}
+      SMARTEVAL_EVIDENCE_REVIEWER_MODEL: ${SMARTEVAL_EVIDENCE_REVIEWER_MODEL:-}
+      SMARTEVAL_EVIDENCE_REVIEWER_BASE_URL: ${SMARTEVAL_EVIDENCE_REVIEWER_BASE_URL:-}
+      SMARTEVAL_EVIDENCE_REVIEWER_API_KEY: ${SMARTEVAL_EVIDENCE_REVIEWER_API_KEY:-}
+      SMARTEVAL_EVIDENCE_REVIEWER_RESPONSE_FORMAT: ${SMARTEVAL_EVIDENCE_REVIEWER_RESPONSE_FORMAT:-}
+      SMARTEVAL_EVIDENCE_REVIEWER_TOKEN_LIMIT_FIELD: ${SMARTEVAL_EVIDENCE_REVIEWER_TOKEN_LIMIT_FIELD:-}
+      SMARTEVAL_EVIDENCE_REVIEWER_EXTRA_BODY_JSON: ${SMARTEVAL_EVIDENCE_REVIEWER_EXTRA_BODY_JSON:-}
+      SMARTEVAL_LOGIC_REVIEWER_MODEL: ${SMARTEVAL_LOGIC_REVIEWER_MODEL:-}
+      SMARTEVAL_LOGIC_REVIEWER_BASE_URL: ${SMARTEVAL_LOGIC_REVIEWER_BASE_URL:-}
+      SMARTEVAL_LOGIC_REVIEWER_API_KEY: ${SMARTEVAL_LOGIC_REVIEWER_API_KEY:-}
+      SMARTEVAL_LOGIC_REVIEWER_RESPONSE_FORMAT: ${SMARTEVAL_LOGIC_REVIEWER_RESPONSE_FORMAT:-}
+      SMARTEVAL_LOGIC_REVIEWER_TOKEN_LIMIT_FIELD: ${SMARTEVAL_LOGIC_REVIEWER_TOKEN_LIMIT_FIELD:-}
+      SMARTEVAL_LOGIC_REVIEWER_EXTRA_BODY_JSON: ${SMARTEVAL_LOGIC_REVIEWER_EXTRA_BODY_JSON:-}
+      SMARTEVAL_REVIEWER_MODEL: ${SMARTEVAL_REVIEWER_MODEL:-}
+      SMARTEVAL_VISION_MODEL: ${SMARTEVAL_VISION_MODEL:-}
+      SMARTEVAL_VISION_BASE_URL: ${SMARTEVAL_VISION_BASE_URL:-}
+      SMARTEVAL_VISION_API_KEY: ${SMARTEVAL_VISION_API_KEY:-}
+      SMARTEVAL_VISION_TOKEN_LIMIT_FIELD: ${SMARTEVAL_VISION_TOKEN_LIMIT_FIELD:-}
+      SMARTEVAL_VISION_EXTRA_BODY_JSON: ${SMARTEVAL_VISION_EXTRA_BODY_JSON:-}
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/live', timeout=2)"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+      start_period: 5s
+    volumes:
+      - objects:/objects
+    networks: [backend, external]
+
+  mcp:
+    build: ./services/mcp
+    restart: unless-stopped
+    depends_on:
+      business: {condition: service_healthy}
+    environment:
+      SMARTEVAL_API_URL: http://business:8080
+      SMARTEVAL_PUBLIC_ORIGIN: ${SMARTEVAL_PUBLIC_ORIGIN:-http://localhost:8088}
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8090/health', timeout=2)"]
+      interval: 5s
+      timeout: 3s
+      retries: 15
+      start_period: 3s
+    networks: [backend]
+
+  web:
+    build: ./apps/web
+    restart: unless-stopped
+    depends_on:
+      business: {condition: service_healthy}
+      mcp: {condition: service_healthy}
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1/nginx-health"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    ports: ["127.0.0.1:${SMARTEVAL_WEB_PORT:-8088}:80"]
+    networks: [backend, external]
+
+  cloudflared:
+    image: cloudflare/cloudflared:latest
+    profiles: ["cloudflare"]
+    restart: unless-stopped
+    command: tunnel --no-autoupdate run
+    environment:
+      TUNNEL_TOKEN: ${CLOUDFLARED_TOKEN:-}
+    depends_on:
+      web: {condition: service_healthy}
+    networks: [external]
+
+networks:
+  backend: {internal: true}
+  external: {}
+
+volumes:
+  database:
+  objects:

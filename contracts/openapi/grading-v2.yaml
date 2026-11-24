@@ -1,0 +1,1611 @@
+openapi: 3.1.0
+info:
+  title: SmartEval Grading API
+  version: 2.0.0
+  description: 提交独立批改任务、自动确认完整结构化输入、接收状态回调与查看报告。教师会话可修改草案和处理复核。
+servers:
+  - url: /api/v2
+security:
+  - IntegrationKey: []
+  - TeacherToken: []
+paths:
+  /health:
+    get:
+      operationId: businessHealth
+      servers: [{url: /}]
+      security: []
+      responses:
+        '204': {description: Business 可接收请求}
+        '503': {description: Business 尚未就绪}
+  /auth/login:
+    post:
+      operationId: login
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [username, password]
+              properties:
+                username: {type: string, maxLength: 120}
+                password: {type: string, maxLength: 128}
+                tenant_id: {type: string, format: uuid}
+      responses:
+        '200': {$ref: '#/components/responses/Tokens'}
+        '401': {$ref: '#/components/responses/Fault'}
+        '429': {$ref: '#/components/responses/Fault'}
+  /auth/key:
+    get:
+      operationId: verifyApiKey
+      security: [{IntegrationKey: []}]
+      description: 校验 X-API-Key 及其工作空间是否有效，供远程 MCP 等轻量网关鉴权使用。
+      responses:
+        '204':
+          description: API Key 有效
+          headers:
+            Cache-Control: {schema: {type: string}}
+        '401': {$ref: '#/components/responses/Fault'}
+  /auth/refresh:
+    post:
+      operationId: refreshSession
+      security: [{RefreshCookie: []}]
+      responses:
+        '200': {$ref: '#/components/responses/Tokens'}
+        '401': {$ref: '#/components/responses/Fault'}
+  /auth/tenant:
+    post:
+      operationId: switchTenant
+      security: [{TeacherToken: []}]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [tenant_id]
+              properties:
+                tenant_id: {type: string, format: uuid}
+      responses:
+        '200': {$ref: '#/components/responses/Tokens'}
+        '403': {$ref: '#/components/responses/Fault'}
+  /auth/logout:
+    post:
+      operationId: logout
+      security: [{TeacherToken: []}]
+      responses:
+        '204':
+          description: 会话已撤销，响应清除刷新 Cookie
+          headers:
+            Set-Cookie: {schema: {type: string}}
+  /auth/password-reset:
+    post:
+      operationId: requestPasswordReset
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [username]
+              properties:
+                username: {type: string, maxLength: 120}
+      responses:
+        '204': {description: 已接收找回密码请求}
+  /auth/password-reset/confirm:
+    post:
+      operationId: resetPassword
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [token, new_password]
+              properties:
+                token: {type: string, maxLength: 100}
+                new_password: {type: string, minLength: 12, maxLength: 128}
+      responses:
+        '204': {description: 密码已重置}
+        '422': {$ref: '#/components/responses/Fault'}
+  /me:
+    get:
+      operationId: getProfile
+      security: [{TeacherToken: []}]
+      responses:
+        '200':
+          description: 当前用户和工作空间
+          headers:
+            ETag: {schema: {type: string}}
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/Profile'}
+    patch:
+      operationId: updateProfile
+      security: [{TeacherToken: []}]
+      parameters:
+        - $ref: '#/components/parameters/Revision'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [display_name]
+              properties:
+                display_name: {type: string, maxLength: 160}
+      responses:
+        '200':
+          description: 用户资料已更新
+          headers:
+            ETag: {schema: {type: string}}
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [id, row_version]
+                properties:
+                  id: {type: string, format: uuid}
+                  row_version: {type: integer}
+        '412': {$ref: '#/components/responses/Fault'}
+  /me/model-config:
+    get:
+      operationId: getUserModelConfig
+      security: [{TeacherToken: []}]
+      description: 查询当前教师个人的模型与 API Key 配置（脱敏显示，不返回明文密钥）。
+      responses:
+        '200':
+          description: 当前模型配置状态
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [configured, server_default_configured]
+                properties:
+                  configured: {type: boolean}
+                  server_default_configured: {type: boolean}
+                  provider: {type: string}
+                  base_url: {type: string}
+                  model_name: {type: string}
+                  response_format: {type: string}
+                  api_key_masked: {type: string}
+                  updated_at: {type: string, format: date-time}
+    put:
+      operationId: saveUserModelConfig
+      security: [{TeacherToken: []}]
+      description: 保存或更新当前教师自备的模型接口地址、模型名与加密存储的 API Key。
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [base_url, model_name]
+              properties:
+                provider: {type: string, maxLength: 40}
+                base_url: {type: string, maxLength: 500}
+                model_name: {type: string, maxLength: 120}
+                api_key: {type: string, maxLength: 512}
+                response_format: {type: string, enum: [json_object, text, json_schema]}
+      responses:
+        '200':
+          description: 模型配置已保存
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [configured, server_default_configured]
+                properties:
+                  configured: {type: boolean}
+                  server_default_configured: {type: boolean}
+                  provider: {type: string}
+                  base_url: {type: string}
+                  model_name: {type: string}
+                  response_format: {type: string}
+                  api_key_masked: {type: string}
+                  updated_at: {type: string, format: date-time}
+        '422': {$ref: '#/components/responses/Fault'}
+    delete:
+      operationId: clearUserModelConfig
+      security: [{TeacherToken: []}]
+      description: 清除当前教师保存的模型 API Key 配置。
+      responses:
+        '204': {description: 已清除个人模型配置}
+  /me/model-config/test:
+    post:
+      operationId: testUserModelConfig
+      security: [{TeacherToken: []}]
+      description: 测试当前或表单中的模型 API Key 连通性与余额状态。
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                base_url: {type: string, maxLength: 500}
+                model_name: {type: string, maxLength: 120}
+                api_key: {type: string, maxLength: 512}
+                response_format: {type: string, enum: [json_object, text, json_schema]}
+      responses:
+        '200':
+          description: 连通性测试结果
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [ok]
+                properties:
+                  ok: {type: boolean}
+                  model: {type: string}
+                  latency_ms: {type: integer}
+                  error: {type: string}
+        '422': {$ref: '#/components/responses/Fault'}
+  /me/recovery-address:
+    get:
+      operationId: getRecoveryAddress
+      security: [{TeacherToken: []}]
+      responses:
+        '200':
+          description: 找回邮箱验证状态
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [verified]
+                properties:
+                  verified: {type: boolean}
+                  address: {type: string}
+    post:
+      operationId: bindRecoveryAddress
+      security: [{TeacherToken: []}]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [address, current_password]
+              properties:
+                address: {type: string, maxLength: 254}
+                current_password: {type: string, maxLength: 128}
+      responses:
+        '204': {description: 已接收邮箱验证请求}
+        '429': {$ref: '#/components/responses/Fault'}
+        '503': {$ref: '#/components/responses/Fault'}
+  /me/recovery-address/confirm:
+    post:
+      operationId: confirmRecoveryAddress
+      security: [{TeacherToken: []}]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [token]
+              properties:
+                token: {type: string, maxLength: 100}
+      responses:
+        '204': {description: 邮箱已验证}
+        '422': {$ref: '#/components/responses/Fault'}
+  /keys:
+    get:
+      operationId: listApiKeys
+      security: [{TeacherToken: []}]
+      responses:
+        '200':
+          description: 工作空间管理员可查看密钥信息
+          content:
+            application/json:
+              schema: {type: array, items: {$ref: '#/components/schemas/ApiKey'}}
+    post:
+      operationId: createApiKey
+      security: [{TeacherToken: []}]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [name, expires_in_days]
+              properties:
+                name: {type: string, maxLength: 140}
+                expires_in_days: {type: integer, minimum: 1, maximum: 365}
+      responses:
+        '201':
+          description: 已创建密钥。请保存 api_key。
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/ApiKey'
+                  - type: object
+                    required: [api_key]
+                    properties:
+                      api_key: {type: string, minLength: 43, maxLength: 43}
+  /keys/{id}:
+    parameters:
+      - $ref: '#/components/parameters/Id'
+    delete:
+      operationId: revokeApiKey
+      security: [{TeacherToken: []}]
+      responses:
+        '204': {description: 密钥已撤销}
+        '404': {$ref: '#/components/responses/Fault'}
+  /assets:
+    post:
+      operationId: uploadAsset
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              required: [file]
+              properties:
+                file: {type: string, format: binary}
+      responses:
+        '201':
+          description: 已保存材料
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [asset_id, name, format, size_bytes]
+                properties:
+                  asset_id: {type: string, format: uuid}
+                  name: {type: string}
+                  format: {type: string}
+                  size_bytes: {type: integer, maximum: 20971520}
+        '413': {description: 文件过大}
+        '422': {description: 文件类型或内容无效}
+  /assets/{id}:
+    parameters:
+      - $ref: '#/components/parameters/Id'
+    get:
+      operationId: downloadMaterial
+      responses:
+        '200': {description: 原始文件}
+        '404': {description: 材料不存在或不可访问}
+  /assets/import-zip:
+    post:
+      operationId: importZipAssets
+      description: 教师或具备 grading:submit 的集成客户端可上传 ZIP。压缩文件最多 100 MiB，解压总量最多 200 MiB，最多导入 100 个受支持文件。
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              required: [file]
+              properties:
+                file: {type: string, format: binary}
+      responses:
+        '201':
+          description: 批量导入结果
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/ZipImport'}
+        '400': {$ref: '#/components/responses/Fault'}
+        '401': {$ref: '#/components/responses/Fault'}
+        '403': {$ref: '#/components/responses/Fault'}
+        '422': {$ref: '#/components/responses/Fault'}
+        '503': {$ref: '#/components/responses/Fault'}
+  /capabilities:
+    get:
+      operationId: readGradingCapabilities
+      security: [{TeacherToken: []}]
+      responses:
+        '200':
+          description: 智能服务当前能力与 Judge0 实例可用语言
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/Capabilities'}
+        '401': {$ref: '#/components/responses/Fault'}
+        '403': {$ref: '#/components/responses/Fault'}
+  /collections:
+    get:
+      operationId: listGradingCollections
+      security: [{TeacherToken: []}]
+      responses:
+        '200':
+          description: 当前工作空间中的收卷
+          content:
+            application/json:
+              schema: {type: array, items: {$ref: '#/components/schemas/Collection'}}
+        '401': {$ref: '#/components/responses/Fault'}
+        '403': {$ref: '#/components/responses/Fault'}
+    post:
+      operationId: createGradingCollection
+      security: [{TeacherToken: []}]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/CreateCollection'}
+      responses:
+        '201':
+          description: 新建收卷与分享令牌
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/Collection'}
+        '401': {$ref: '#/components/responses/Fault'}
+        '403': {$ref: '#/components/responses/Fault'}
+        '404': {$ref: '#/components/responses/Fault'}
+        '422': {$ref: '#/components/responses/Fault'}
+  /collections/{id}:
+    parameters:
+      - $ref: '#/components/parameters/Id'
+    get:
+      operationId: readGradingCollection
+      security: [{TeacherToken: []}]
+      responses:
+        '200':
+          description: 收卷与提交清单
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/CollectionDetail'}
+        '401': {$ref: '#/components/responses/Fault'}
+        '403': {$ref: '#/components/responses/Fault'}
+        '404': {$ref: '#/components/responses/Fault'}
+    patch:
+      operationId: changeGradingCollectionState
+      security: [{TeacherToken: []}]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [status]
+              properties:
+                status: {enum: [OPEN, CLOSED]}
+      responses:
+        '200':
+          description: 已更新的收卷
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/Collection'}
+        '401': {$ref: '#/components/responses/Fault'}
+        '403': {$ref: '#/components/responses/Fault'}
+        '404': {$ref: '#/components/responses/Fault'}
+        '409': {$ref: '#/components/responses/Fault'}
+        '422': {$ref: '#/components/responses/Fault'}
+  /collections/{id}/entries/{entryId}:
+    parameters:
+      - $ref: '#/components/parameters/Id'
+      - {name: entryId, in: path, required: true, schema: {type: string, format: uuid}}
+    delete:
+      operationId: returnGradingCollectionEntry
+      security: [{TeacherToken: []}]
+      responses:
+        '204': {description: 已退回答卷并允许原编号重交}
+        '401': {$ref: '#/components/responses/Fault'}
+        '403': {$ref: '#/components/responses/Fault'}
+        '404': {$ref: '#/components/responses/Fault'}
+        '409': {$ref: '#/components/responses/Fault'}
+  /collections/{id}/create-job:
+    parameters:
+      - $ref: '#/components/parameters/Id'
+    post:
+      operationId: convertGradingCollection
+      security: [{TeacherToken: []}]
+      responses:
+        '202':
+          description: 已建立批改任务。再次转换同一收卷时返回同一个任务。
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/Job'}
+        '401': {$ref: '#/components/responses/Fault'}
+        '403': {$ref: '#/components/responses/Fault'}
+        '404': {$ref: '#/components/responses/Fault'}
+        '422': {$ref: '#/components/responses/Fault'}
+  /public/collections/{token}:
+    parameters:
+      - $ref: '#/components/parameters/ShareToken'
+    get:
+      operationId: readPublicGradingCollection
+      security: []
+      responses:
+        '200':
+          description: 交卷所需的公开信息
+          headers:
+            Cache-Control: {schema: {type: string}}
+            Referrer-Policy: {schema: {type: string}}
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/PublicCollection'}
+        '404': {$ref: '#/components/responses/Fault'}
+  /public/collections/{token}/submit:
+    parameters:
+      - $ref: '#/components/parameters/ShareToken'
+    post:
+      operationId: submitPublicGradingCollection
+      security: []
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              required: [submission_id]
+              properties:
+                submission_id: {type: string, minLength: 1, maxLength: 100}
+                answer_text: {type: string, maxLength: 24000}
+                language: {$ref: '#/components/schemas/CodeLanguage'}
+                files: {type: array, maxItems: 5, items: {type: string, format: binary}}
+      responses:
+        '201':
+          description: 答卷已提交
+          headers:
+            Cache-Control: {schema: {type: string}}
+        '400': {$ref: '#/components/responses/Fault'}
+        '404': {$ref: '#/components/responses/Fault'}
+        '409': {$ref: '#/components/responses/Fault'}
+        '410': {$ref: '#/components/responses/Fault'}
+        '413': {$ref: '#/components/responses/Fault'}
+        '422': {$ref: '#/components/responses/Fault'}
+        '429': {$ref: '#/components/responses/Fault'}
+        '503': {$ref: '#/components/responses/Fault'}
+  /assets/{id}/pages/{page}:
+    parameters:
+      - $ref: '#/components/parameters/Id'
+      - {name: page, in: path, required: true, description: PDF 页码从 1 起。PNG 与 JPG 只支持第 1 页。, schema: {type: integer, minimum: 1, maximum: 20}}
+    get:
+      operationId: renderPdfPage
+      responses:
+        '200':
+          description: 用于叠加证据区域的 PDF 或图片页面，JPEG 方向与提取坐标一致。
+          headers:
+            Cache-Control: {schema: {type: string}}
+          content:
+            image/jpeg:
+              schema: {type: string, format: binary}
+        '404': {description: 材料不存在或不可访问}
+        '503': {description: 预览服务暂不可用}
+  /grading-jobs:
+    get:
+      operationId: listGradingJobs
+      parameters:
+        - {name: page, in: query, schema: {type: integer, minimum: 1, default: 1}}
+      responses:
+        '200':
+          description: 按创建时间降序，每页 50 条
+          content:
+            application/json:
+              schema: {type: array, items: {$ref: '#/components/schemas/Job'}}
+    post:
+      operationId: createGradingJob
+      parameters:
+        - name: Idempotency-Key
+          in: header
+          required: true
+          schema: {type: string, pattern: '^[A-Za-z0-9._:-]{1,100}$'}
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/CreateJob'}
+      responses:
+        '202':
+          description: 已接收相同或新任务。自动确认的任务直接进入运行轮次 1。
+          headers:
+            Location: {schema: {type: string}}
+            ETag: {schema: {type: string}}
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/CreatedJob'}
+        '409': {description: 幂等键已用于不同输入}
+        '422': {description: 材料或结构化输入无效}
+        '503': {description: 自动确认所需的模型或判题语言配置不可用}
+  /grading-jobs/{id}:
+    parameters:
+      - $ref: '#/components/parameters/Id'
+    get:
+      operationId: getGradingJob
+      responses:
+        '200': {$ref: '#/components/responses/Job'}
+        '404': {description: 任务不存在或不可访问}
+    delete:
+      operationId: cancelPreparation
+      security: [{TeacherToken: []}]
+      parameters:
+        - $ref: '#/components/parameters/Revision'
+      responses:
+        '204': {description: 已取消未确认的任务}
+        '409': {description: 已确认的任务无法取消}
+        '412': {description: 任务版本已更改}
+  /grading-jobs/{id}/draft:
+    parameters:
+      - $ref: '#/components/parameters/Id'
+    get:
+      operationId: getDraft
+      responses:
+        '200':
+          description: 题目与答案草案、原文位置及答卷编号
+          headers:
+            ETag: {schema: {type: string}}
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  draft: {$ref: '#/components/schemas/Draft'}
+                  sources: {type: array, items: {$ref: '#/components/schemas/Source'}}
+                  materials: {type: array, items: {$ref: '#/components/schemas/Material'}}
+                  submissions: {type: array, items: {type: string}}
+        '409': {description: 草案尚未准备完成}
+    patch:
+      operationId: replaceDraft
+      security: [{TeacherToken: []}]
+      parameters:
+        - $ref: '#/components/parameters/Revision'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/Draft'}
+      responses:
+        '200': {$ref: '#/components/responses/Job'}
+        '409': {description: 草案不可编辑}
+        '412': {description: 任务版本已更改}
+  /grading-jobs/{id}/confirm:
+    parameters:
+      - $ref: '#/components/parameters/Id'
+      - $ref: '#/components/parameters/Revision'
+    post:
+      operationId: confirmAndQueue
+      security: [{TeacherToken: []}]
+      responses:
+        '200': {$ref: '#/components/responses/Job'}
+        '409': {description: 任务状态有冲突}
+        '412': {description: 任务版本已更改}
+        '422': {description: 评分细则或答卷仍需补充}
+        '503': {description: 评分模型、智能服务或判题语言未就绪}
+  /grading-jobs/{id}/retry:
+    parameters:
+      - $ref: '#/components/parameters/Id'
+      - $ref: '#/components/parameters/Revision'
+      - {name: item, in: query, schema: {type: integer, minimum: 1}, description: 单题序号。解析失败时省略。}
+    post:
+      operationId: retryFailedWork
+      security: [{TeacherToken: []}]
+      responses:
+        '200': {$ref: '#/components/responses/Job'}
+        '409': {description: 当前阶段无法重试}
+        '412': {description: 任务版本已更改}
+  /grading-jobs/{id}/regrades:
+    parameters:
+      - $ref: '#/components/parameters/Id'
+      - $ref: '#/components/parameters/Revision'
+    post:
+      operationId: regradeWithConfirmedStandard
+      security: [{TeacherToken: []}]
+      responses:
+        '200': {$ref: '#/components/responses/Job'}
+        '409': {description: 当前版本仍在批改}
+        '412': {description: 任务版本已更改}
+  /grading-jobs/{id}/webhooks:
+    parameters:
+      - $ref: '#/components/parameters/Id'
+    get:
+      operationId: listWebhookDeliveries
+      description: 查看该任务最近 50 条 Webhook 投递记录与重试状态。
+      responses:
+        '200':
+          description: Webhook 投递历史
+          content:
+            application/json:
+              schema: {type: array, items: {$ref: '#/components/schemas/WebhookDelivery'}}
+        '404': {$ref: '#/components/responses/Fault'}
+  /grading-jobs/{id}/report:
+    parameters:
+      - $ref: '#/components/parameters/Id'
+      - {name: run, in: query, schema: {type: integer, minimum: 1}}
+    get:
+      operationId: readGradingReport
+      responses:
+        '200':
+          description: 指定或最新版本的报告，包含进行中的逐题状态
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/Report'}
+        '404': {description: 报告不存在或不可访问}
+  /grading-jobs/{id}/export:
+    parameters:
+      - $ref: '#/components/parameters/Id'
+      - {name: run, in: query, schema: {type: integer, minimum: 1}}
+      - {name: format, in: query, required: true, schema: {type: string, enum: [csv]}}
+    get:
+      operationId: exportGradingCsv
+      description: 教师或持有 grading:read 的集成客户端可导出有权读取的批改报告。默认选择最新轮次。
+      responses:
+        '200':
+          description: 使用 UTF-8 BOM 和 CRLF 的 CSV 成绩单。含各题建议分、最终分与状态，以及总分和复核备注。
+          headers:
+            Content-Disposition: {required: true, schema: {type: string}, example: 'attachment; filename="grading-example-run-1.csv"'}
+            Cache-Control: {schema: {type: string}}
+          content:
+            text/csv:
+              schema: {type: string}
+        '400': {description: 缺少 format 或参数类型无效}
+        '401': {description: 未认证}
+        '403': {description: 缺少读取权限}
+        '404': {description: 报告不存在或不可访问}
+        '422': {description: 格式无效}
+  /grading-jobs/{id}/reviews/{item}:
+    parameters:
+      - $ref: '#/components/parameters/Id'
+      - {name: item, in: path, required: true, schema: {type: integer, minimum: 1}}
+    get:
+      operationId: readReviewHistory
+      parameters:
+        - {name: run, in: query, required: true, schema: {type: integer, minimum: 1}}
+      responses:
+        '200':
+          description: 该题的复核修订历史
+          content:
+            application/json:
+              schema: {type: array, items: {$ref: '#/components/schemas/Review'}}
+    post:
+      operationId: setReviewedScore
+      security: [{TeacherToken: []}]
+      parameters:
+        - $ref: '#/components/parameters/Revision'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [run, score, reason]
+              properties:
+                run: {type: integer, minimum: 1}
+                score: {type: integer, minimum: 0}
+                reason: {type: string, minLength: 1, maxLength: 1000}
+      responses:
+        '204': {description: 已保存教师复核与改分理由}
+        '412': {description: 批改轮次或单题版本已更改}
+  /grading-templates:
+    get:
+      operationId: listTemplates
+      description: 教师和持有 grading:read 的客户端可以读取当前工作空间内的评分模板。
+      responses:
+        '200':
+          description: 工作空间评分模板
+          content:
+            application/json:
+              schema: {type: array, items: {$ref: '#/components/schemas/Template'}}
+  /grading-jobs/{id}/templates:
+    parameters:
+      - $ref: '#/components/parameters/Id'
+    post:
+      operationId: saveConfirmedTemplate
+      security: [{TeacherToken: []}]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [title]
+              properties:
+                title: {type: string, minLength: 1, maxLength: 160}
+                template_id: {type: string, format: uuid, description: 追加到已有模板时指定。}
+      responses:
+        '201':
+          description: 已保存模板版本
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/Template'}
+  /grading-templates/{id}:
+    parameters:
+      - $ref: '#/components/parameters/Id'
+    delete:
+      operationId: deleteGradingTemplate
+      security: [{TeacherToken: []}]
+      responses:
+        '204': {description: 已删除该模板的所有版本}
+        '401': {$ref: '#/components/responses/Fault'}
+        '403': {$ref: '#/components/responses/Fault'}
+        '404': {$ref: '#/components/responses/Fault'}
+        '409': {$ref: '#/components/responses/Fault'}
+  /analytics/overview:
+    get:
+      operationId: getAnalyticsOverview
+      security: [{TeacherToken: []}]
+      description: 工作空间学情与批改质量总览指标，含任务统计、人工复核量、相似度告警和近期任务摘要。
+      responses:
+        '200':
+          description: 工作空间级学情总览
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/AnalyticsOverview'}
+        '401': {$ref: '#/components/responses/Fault'}
+        '403': {$ref: '#/components/responses/Fault'}
+  /grading-jobs/{id}/analytics:
+    parameters:
+      - $ref: '#/components/parameters/Id'
+      - {name: run, in: query, schema: {type: integer, minimum: 1}}
+    get:
+      operationId: getJobAnalytics
+      description: 单次批改任务的分数统计（均分/中位数/标准差/及格率/优秀率）、分数段分布、按题薄弱点统计及复核状态汇总。
+      responses:
+        '200':
+          description: 任务级学情与质量分析
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/JobAnalytics'}
+        '401': {$ref: '#/components/responses/Fault'}
+        '403': {$ref: '#/components/responses/Fault'}
+        '404': {$ref: '#/components/responses/Fault'}
+  /grading-jobs/{id}/eval-dataset:
+    parameters:
+      - $ref: '#/components/parameters/Id'
+      - {name: run, in: query, schema: {type: integer, minimum: 1}}
+    get:
+      operationId: exportEvalDataset
+      security: [{TeacherToken: []}]
+      description: 导出匿名化评测数据集 JSON（答卷编号替换为 S001 等），可直接导入论文评测流水线进行离线复现。
+      responses:
+        '200':
+          description: 匿名化评测集 JSON 文件
+          headers:
+            Content-Disposition: {required: true, schema: {type: string}}
+            Cache-Control: {schema: {type: string}}
+          content:
+            application/json:
+              schema: {type: object}
+        '401': {$ref: '#/components/responses/Fault'}
+        '403': {$ref: '#/components/responses/Fault'}
+        '404': {$ref: '#/components/responses/Fault'}
+  /workspace/members:
+    get:
+      operationId: listWorkspaceMembers
+      security: [{TeacherToken: []}]
+      description: 工作空间管理员查看成员列表及角色状态。
+      responses:
+        '200':
+          description: 工作空间成员清单
+          content:
+            application/json:
+              schema: {type: array, items: {$ref: '#/components/schemas/WorkspaceMember'}}
+        '401': {$ref: '#/components/responses/Fault'}
+        '403': {$ref: '#/components/responses/Fault'}
+    post:
+      operationId: createWorkspaceMember
+      security: [{TeacherToken: []}]
+      description: 工作空间管理员新增教师或管理员账号。
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/CreateWorkspaceMember'}
+      responses:
+        '201':
+          description: 已创建成员账号
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/WorkspaceMember'}
+        '401': {$ref: '#/components/responses/Fault'}
+        '403': {$ref: '#/components/responses/Fault'}
+        '409': {$ref: '#/components/responses/Fault'}
+        '422': {$ref: '#/components/responses/Fault'}
+  /workspace/members/{memberId}:
+    parameters:
+      - {name: memberId, in: path, required: true, schema: {type: string, format: uuid}}
+    patch:
+      operationId: updateWorkspaceMember
+      security: [{TeacherToken: []}]
+      description: 工作空间管理员修改成员角色或启用/停用状态。禁止停用本人或移除最后一名有效管理员。
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/UpdateWorkspaceMember'}
+      responses:
+        '200':
+          description: 已更新成员信息
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/WorkspaceMember'}
+        '401': {$ref: '#/components/responses/Fault'}
+        '403': {$ref: '#/components/responses/Fault'}
+        '404': {$ref: '#/components/responses/Fault'}
+        '409': {$ref: '#/components/responses/Fault'}
+        '422': {$ref: '#/components/responses/Fault'}
+  /workspace/audit-logs:
+    get:
+      operationId: listWorkspaceAuditLogs
+      security: [{TeacherToken: []}]
+      description: 工作空间管理员分页查询审计日志，支持按操作类型筛选。
+      parameters:
+        - {name: page, in: query, schema: {type: integer, minimum: 1, maximum: 1000, default: 1}}
+        - {name: action, in: query, schema: {type: string, maxLength: 64}}
+      responses:
+        '200':
+          description: 审计日志条目列表（每页 50 条）
+          content:
+            application/json:
+              schema: {type: array, items: {$ref: '#/components/schemas/AuditLogEntry'}}
+        '401': {$ref: '#/components/responses/Fault'}
+        '403': {$ref: '#/components/responses/Fault'}
+        '422': {$ref: '#/components/responses/Fault'}
+webhooks:
+  jobStatusChanged:
+    post:
+      operationId: receiveJobStatus
+      security: []
+      description: 接收端按 X-SmartEval-Delivery 去重。以 webhook_secret 的 UTF-8 字节为密钥，对原始请求体字节计算 HMAC-SHA256。投递失败最多尝试 5 次。
+      parameters:
+        - {name: X-SmartEval-Event, in: header, required: true, schema: {$ref: '#/components/schemas/JobEventType'}}
+        - {name: X-SmartEval-Delivery, in: header, required: true, schema: {type: string, format: uuid}}
+        - {name: X-SmartEval-Signature, in: header, required: true, schema: {type: string, pattern: '^sha256=[0-9a-f]{64}$'}}
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/JobEvent'}
+      responses:
+        '2XX': {description: 已接收}
+components:
+  securitySchemes:
+    IntegrationKey: {type: apiKey, in: header, name: X-API-Key}
+    TeacherToken: {type: http, scheme: bearer}
+    RefreshCookie: {type: apiKey, in: cookie, name: smarteval_refresh}
+  parameters:
+    ShareToken:
+      name: token
+      in: path
+      required: true
+      schema: {type: string, pattern: '^[A-Za-z0-9_-]{43}$'}
+    Id: {name: id, in: path, required: true, schema: {type: string, format: uuid}}
+    Revision: {name: If-Match, in: header, required: true, schema: {type: string}}
+  responses:
+    Fault:
+      description: API 错误
+      content:
+        application/json:
+          schema: {$ref: '#/components/schemas/Fault'}
+    Tokens:
+      description: 访问令牌与刷新 Cookie
+      headers:
+        Set-Cookie: {schema: {type: string}}
+      content:
+        application/json:
+          schema:
+            type: object
+            required: [access_token, expires_in, tenant_id]
+            properties:
+              access_token: {type: string}
+              expires_in: {type: integer}
+              tenant_id: {type: string, format: uuid}
+    Job:
+      description: 任务及版本
+      headers:
+        ETag: {schema: {type: string}}
+      content:
+        application/json:
+          schema: {$ref: '#/components/schemas/Job'}
+  schemas:
+    CodeLanguage:
+      enum: [PYTHON, JAVA, CPP, C, JAVASCRIPT]
+    ZipImport:
+      type: object
+      additionalProperties: false
+      required: [items, skipped]
+      properties:
+        items:
+          type: array
+          maxItems: 100
+          items:
+            type: object
+            additionalProperties: false
+            required: [asset_id, name, format, size_bytes, suggested_submission_id]
+            properties:
+              asset_id: {type: string, format: uuid}
+              name: {type: string}
+              format: {type: string}
+              size_bytes: {type: integer, minimum: 1, maximum: 20971520}
+              suggested_submission_id: {type: string, maxLength: 100}
+        skipped:
+          type: array
+          items:
+            type: object
+            required: [name, reason]
+            properties:
+              name: {type: string}
+              reason: {enum: [FILE_SIZE, FILE_NAME, UNSUPPORTED_EXTENSION, UNSUPPORTED_FILE, INVALID_SUBMISSION_ID]}
+    Ready:
+      type: object
+      required: [ready]
+      properties:
+        ready: {type: boolean}
+    Capabilities:
+      type: object
+      required: [text_model, vision, ocr, judge, similarity]
+      properties:
+        text_model: {$ref: '#/components/schemas/Ready'}
+        vision: {$ref: '#/components/schemas/Ready'}
+        ocr: {$ref: '#/components/schemas/Ready'}
+        similarity: {$ref: '#/components/schemas/Ready'}
+        judge:
+          type: object
+          required: [ready, languages]
+          properties:
+            ready: {type: boolean}
+            languages: {type: array, items: {$ref: '#/components/schemas/CodeLanguage'}}
+    CollectionStatus:
+      enum: [OPEN, CLOSED, CONVERTED]
+    CollectionPreset:
+      type: object
+      not: {required: [questions, template]}
+      properties:
+        questions:
+          type: array
+          minItems: 1
+          maxItems: 80
+          items:
+            allOf:
+              - $ref: '#/components/schemas/Question'
+              - required: [max_score]
+                properties: {answers: false, source_ids: false}
+        template:
+          type: object
+          required: [id, version]
+          properties:
+            id: {type: string, format: uuid}
+            version: {type: integer, minimum: 1}
+        materials:
+          type: array
+          maxItems: 100
+          items:
+            type: object
+            required: [asset_id, role]
+            properties:
+              asset_id: {type: string, format: uuid}
+              role: {enum: [QUESTION, REFERENCE]}
+    CreateCollection:
+      type: object
+      required: [title]
+      properties:
+        title: {type: string, minLength: 1, maxLength: 160}
+        description: {type: string, maxLength: 4000}
+        preset_config:
+          anyOf:
+            - $ref: '#/components/schemas/CollectionPreset'
+            - type: 'null'
+    Collection:
+      type: object
+      required: [id, title, description, status, share_token, preset_config, job_id, created_at, updated_at, entry_count]
+      properties:
+        id: {type: string, format: uuid}
+        title: {type: string}
+        description: {type: string}
+        status: {$ref: '#/components/schemas/CollectionStatus'}
+        share_token: {type: string, pattern: '^[A-Za-z0-9_-]{43}$'}
+        preset_config:
+          anyOf:
+            - $ref: '#/components/schemas/CollectionPreset'
+            - type: 'null'
+        job_id: {type: [string, 'null'], format: uuid}
+        created_at: {type: string, format: date-time}
+        updated_at: {type: string, format: date-time}
+        entry_count: {type: integer, minimum: 0, maximum: 100}
+    CollectionDetail:
+      allOf:
+        - $ref: '#/components/schemas/Collection'
+        - type: object
+          required: [entries]
+          properties:
+            entries:
+              type: array
+              maxItems: 100
+              items:
+                type: object
+                required: [id, submission_id, answer_text, language, asset_ids, submitted_at]
+                properties:
+                  id: {type: string, format: uuid}
+                  submission_id: {type: string, maxLength: 100}
+                  answer_text: {type: [string, 'null'], maxLength: 24000}
+                  language:
+                    anyOf:
+                      - $ref: '#/components/schemas/CodeLanguage'
+                      - type: 'null'
+                  asset_ids: {type: array, maxItems: 5, items: {type: string, format: uuid}}
+                  submitted_at: {type: string, format: date-time}
+    PublicCollection:
+      type: object
+      additionalProperties: false
+      required: [title, description, status, allowed_file_types]
+      properties:
+        title: {type: string}
+        description: {type: string}
+        status: {$ref: '#/components/schemas/CollectionStatus'}
+        allowed_file_types: {type: array, items: {type: string}}
+    Fault:
+      type: object
+      required: [code, message, trace_id, field_errors]
+      properties:
+        code: {type: string}
+        message: {type: string}
+        trace_id: {type: string, format: uuid}
+        field_errors: {type: array, items: {}}
+    Profile:
+      type: object
+      required: [id, display_name, tenant_id, workspaces, can_manage_keys]
+      properties:
+        id: {type: string, format: uuid}
+        display_name: {type: string}
+        tenant_id: {type: string, format: uuid}
+        can_manage_keys: {type: boolean}
+        workspaces:
+          type: array
+          items:
+            type: object
+            required: [tenant_id, name]
+            properties:
+              tenant_id: {type: string, format: uuid}
+              name: {type: string}
+    ApiKey:
+      type: object
+      required: [id, name, expires_at]
+      properties:
+        id: {type: string, format: uuid}
+        name: {type: string}
+        expires_at: {type: string, format: date-time}
+        revoked_at: {type: [string, 'null'], format: date-time}
+    JobEventType:
+      enum: [AWAITING_CONFIRMATION, COMPLETED, REVIEW_REQUIRED, PREPARATION_FAILED]
+    JobEvent:
+      type: object
+      required: [id, event, occurred_at, job]
+      properties:
+        id: {type: string, format: uuid}
+        event: {$ref: '#/components/schemas/JobEventType'}
+        occurred_at: {type: string, format: date-time}
+        job: {$ref: '#/components/schemas/Job'}
+    CreatedJob:
+      allOf:
+        - $ref: '#/components/schemas/Job'
+        - type: object
+          properties:
+            webhook_secret: {type: string, minLength: 43, maxLength: 43, description: 指定回调时仅在创建响应中返回。}
+    Job:
+      type: object
+      required: [id, title, status, status_url, revision, run, created_at]
+      properties:
+        id: {type: string, format: uuid}
+        title: {type: string}
+        status:
+          enum: [PREPARING, AWAITING_CONFIRMATION, PREPARATION_FAILED, CANCELLED, QUEUED, GRADING, REVIEW_REQUIRED, COMPLETED]
+        status_url: {type: string}
+        revision: {type: integer}
+        run: {type: integer}
+        created_at: {type: string, format: date-time}
+        confirmed_at: {type: string, format: date-time}
+        error_code: {type: string}
+        counts: {type: object, additionalProperties: {type: integer}}
+    CreateJob:
+      type: object
+      required: [title]
+      properties:
+        title: {type: string, minLength: 1, maxLength: 160}
+        auto_confirm: {type: boolean, default: false, description: 要求完整的 questions 和每题 answers。不得指定待解析材料或模板。}
+        webhook_url: {type: string, format: uri, maxLength: 2048, description: 公共 HTTP(S) 回调地址。默认屏蔽内网和回环地址。}
+        materials: {type: array, maxItems: 100, description: 原始材料合计最多 200 MiB。, items: {$ref: '#/components/schemas/Material'}}
+        questions: {type: array, maxItems: 80, items: {$ref: '#/components/schemas/Question'}}
+        template:
+          type: object
+          required: [id, version]
+          properties:
+            id: {type: string, format: uuid}
+            version: {type: integer, minimum: 1}
+    Draft:
+      type: object
+      required: [questions]
+      properties:
+        questions: {type: array, maxItems: 80, items: {$ref: '#/components/schemas/Question'}}
+        diagnostics: {type: array, items: {type: object}}
+        trace: {$ref: '#/components/schemas/Trace'}
+    Material:
+      type: object
+      required: [asset_id, role]
+      properties:
+        asset_id: {type: string, format: uuid}
+        role: {enum: [QUESTION, REFERENCE, ANSWER]}
+        submission_id: {type: string, maxLength: 100, description: ANSWER 材料必须提供答卷编号。}
+        name: {type: string}
+        format: {type: string}
+    Question:
+      type: object
+      required: [id, prompt, kind]
+      properties:
+        id: {type: string, maxLength: 80}
+        prompt: {type: string, maxLength: 16000, description: 题干文本，UTF-8 编码不超过 16000 字节。}
+        kind: {enum: [TEXT, EXACT, CODE]}
+        max_score: {type: integer, minimum: 1, maximum: 10000}
+        reference_answer: {type: [string, 'null']}
+        source_ids: {type: array, items: {type: string}}
+        accepted: {type: array, items: {type: string}}
+        rubric:
+          type: array
+          items:
+            type: object
+            required: [id, points, description]
+            properties:
+              id: {type: string}
+              points: {type: integer, minimum: 1}
+              description: {type: string}
+        tests:
+          type: array
+          items:
+            type: object
+            required: [id, points, input, expected]
+            properties:
+              id: {type: string}
+              points: {type: integer, minimum: 1}
+              input: {type: string}
+              expected: {type: string}
+        answers:
+          type: array
+          maxItems: 100
+          items:
+            type: object
+            required: [submission_id, text]
+            properties:
+              submission_id: {type: string}
+              text: {type: string, maxLength: 24000}
+              language: {enum: [PYTHON, JAVA, CPP, C, JAVASCRIPT]}
+              needs_input: {type: boolean}
+              source_ids: {type: array, items: {type: string}}
+    Source:
+      type: object
+      properties:
+        id: {type: string}
+        asset_id: {type: string, format: uuid}
+        text: {type: string}
+        name: {type: string}
+        role: {type: string}
+        submission_id: {type: string}
+        origin: {type: string}
+        language: {type: [string, 'null']}
+        table: {type: integer}
+        row: {type: integer}
+        column: {type: integer}
+        page: {type: integer}
+        paragraph: {type: integer}
+        line: {type: integer}
+        region:
+          type: object
+          required: [x, y, width, height]
+          properties:
+            x: {type: number, minimum: 0, maximum: 1}
+            y: {type: number, minimum: 0, maximum: 1}
+            width: {type: number, minimum: 0, maximum: 1}
+            height: {type: number, minimum: 0, maximum: 1}
+    LineRange:
+      type: object
+      additionalProperties: false
+      required: [start, end]
+      description: 源代码行号从 1 起，包含起止行。
+      properties:
+        start: {type: integer, minimum: 1}
+        end: {type: integer, minimum: 1}
+    SimilarityAlert:
+      type: object
+      additionalProperties: false
+      required: [question_id, left_submission_id, right_submission_id, language, score, matches, summary, level]
+      properties:
+        question_id: {type: string}
+        left_submission_id: {type: string}
+        right_submission_id: {type: string}
+        language: {enum: [PYTHON, JAVA, CPP, C, JAVASCRIPT]}
+        score: {type: number, minimum: 0, maximum: 1}
+        level: {enum: [HIGH, MEDIUM], description: 分数至少 0.80 为 HIGH，其余达到告警阈值的配对为 MEDIUM。}
+        summary: {type: string}
+        matches:
+          type: array
+          maxItems: 8
+          items:
+            type: object
+            additionalProperties: false
+            required: [left_lines, right_lines, structure_tokens]
+            properties:
+              left_lines: {$ref: '#/components/schemas/LineRange'}
+              right_lines: {$ref: '#/components/schemas/LineRange'}
+              structure_tokens: {type: integer, minimum: 1}
+    Report:
+      type: object
+      required: [job_id, run, latest_run, confirmed_at, workflow, items, submissions, sources, materials, similarity_status, similarity_alerts]
+      properties:
+        job_id: {type: string, format: uuid}
+        run: {type: integer}
+        latest_run: {type: integer}
+        confirmed_at: {type: string, format: date-time}
+        workflow: {$ref: '#/components/schemas/EngineConfiguration'}
+        items:
+          type: array
+          items:
+            type: object
+            properties:
+              ordinal: {type: integer}
+              revision: {type: integer}
+              status: {enum: [QUEUED, RUNNING, FAILED, SCORED, REVIEW_REQUIRED]}
+              error_code: {type: string}
+              question_id: {type: string}
+              kind: {enum: [TEXT, EXACT, CODE]}
+              prompt: {type: string, maxLength: 16000, description: 题干文本，UTF-8 编码不超过 16000 字节。}
+              submission_id: {type: string}
+              max_score: {type: integer}
+              answer: {type: string}
+              source_ids: {type: array, items: {type: string}}
+              result: {$ref: '#/components/schemas/Result'}
+        submissions:
+          type: array
+          items:
+            type: object
+            properties:
+              submission_id: {type: string}
+              max_score: {type: integer}
+              suggested_points_so_far: {type: integer}
+              scored_items: {type: integer}
+              final_points_so_far: {type: integer}
+              final_items: {type: integer}
+              total_items: {type: integer}
+        sources: {type: array, items: {$ref: '#/components/schemas/Source'}}
+        materials: {type: array, items: {$ref: '#/components/schemas/Material'}}
+        similarity_status:
+          enum: [NOT_APPLICABLE, PENDING, COMPLETED, FAILED]
+          description: PENDING 包含等待判分与异步计算。FAILED 表示已用尽重试次数。
+        similarity_alerts:
+          type: array
+          items: {$ref: '#/components/schemas/SimilarityAlert'}
+    Review:
+      type: object
+      properties:
+        revision: {type: integer}
+        reviewer_id: {type: string, format: uuid}
+        reason: {type: string}
+        created_at: {type: string, format: date-time}
+        previous: {$ref: '#/components/schemas/Result'}
+        revised: {$ref: '#/components/schemas/Result'}
+    EngineConfiguration:
+      type: object
+      properties:
+        engine_version: {type: string}
+        judge: {type: [string, 'null']}
+        role_models:
+          type: object
+          additionalProperties:
+            type: object
+            required: [model, configuration_id]
+            properties:
+              model: {type: string}
+              configuration_id: {type: string}
+    Trace:
+      type: object
+      properties:
+        roles: {type: array, items: {type: string}}
+        engine_version: {type: [string, 'null']}
+        review_mode: {enum: [revise, veto]}
+        review_error: {type: string}
+        usage:
+          type: array
+          items:
+            type: object
+            required: [agent_role, model, input_tokens, output_tokens, latency_ms]
+            properties:
+              agent_role: {type: string}
+              model: {type: string}
+              input_tokens: {type: [integer, 'null']}
+              output_tokens: {type: [integer, 'null']}
+              latency_ms: {type: integer}
+    Result:
+      type: [object, 'null']
+      properties:
+        suggested_score: {type: [integer, 'null']}
+        final_score: {type: [integer, 'null']}
+        declared_total_score: {type: [integer, 'null']}
+        approved: {type: boolean}
+        reviewer_revised: {type: boolean}
+        review_summary: {type: string}
+        reason: {type: string}
+        review_reason: {type: string}
+        decision: {enum: [RULE, AGENTS, JUDGE, TEACHER]}
+        risk_signals:
+          type: array
+          items: {type: string}
+        trace: {$ref: '#/components/schemas/Trace'}
+        analysis_error: {type: string}
+        findings:
+          type: array
+          items:
+            type: object
+            properties:
+              quote: {type: string}
+              reason: {type: string}
+              line: {type: integer}
+        initial_criteria:
+          type: array
+          description: 当复核 Agent 修订了初评结果时保留的初评细则快照。
+          items:
+            type: object
+            properties:
+              id: {type: string}
+              points: {type: integer}
+              reason: {type: string}
+              quote: {type: string}
+        criteria:
+          type: array
+          items:
+            type: object
+            properties:
+              id: {type: string}
+              points: {type: integer}
+              max_points: {type: integer}
+              description: {type: string, description: 报告中对应的已确认评分细则。}
+              reason: {type: string}
+              detail: {type: string, description: 编程题非 AC 时的编译输出、标准错误或实际输出摘要。}
+              quote: {type: string}
+              start: {type: integer, description: 原答中的 UTF-16 起始索引。}
+              end: {type: integer, description: 原答中的 UTF-16 结束索引。}
+              wall_time_ms: {type: integer}
+              source_ids: {type: array, items: {type: string}}
+    Template:
+      type: object
+      properties:
+        id: {type: string, format: uuid}
+        version: {type: integer}
+        title: {type: string}
+        questions: {type: array, items: {$ref: '#/components/schemas/Question'}}
+    WebhookDelivery:
+      type: object
+      required: [id, run, job_revision, event, status, attempts, created_at]
+      properties:
+        id: {type: string, format: uuid}
+        run: {type: integer}
+        job_revision: {type: integer}
+        event: {$ref: '#/components/schemas/JobEventType'}
+        status: {enum: [PENDING, DELIVERED, FAILED]}
+        attempts: {type: integer}
+        last_http_status: {type: [integer, 'null']}
+        created_at: {type: string, format: date-time}
+        delivered_at: {type: [string, 'null'], format: date-time}
+        next_attempt_at: {type: [string, 'null'], format: date-time}
+    AnalyticsOverview:
+      type: object
+      required: [total_jobs, active_jobs, awaiting_confirmation_jobs, review_required_jobs, completed_jobs, total_items, scored_items, review_required_items, failed_items, human_reviewed_items, similarity_high_alerts, similarity_medium_alerts, recent_jobs]
+      properties:
+        total_jobs: {type: integer}
+        active_jobs: {type: integer}
+        awaiting_confirmation_jobs: {type: integer}
+        review_required_jobs: {type: integer}
+        completed_jobs: {type: integer}
+        total_items: {type: integer}
+        scored_items: {type: integer}
+        review_required_items: {type: integer}
+        failed_items: {type: integer}
+        human_reviewed_items: {type: integer}
+        similarity_high_alerts: {type: integer}
+        similarity_medium_alerts: {type: integer}
+        recent_jobs:
+          type: array
+          items:
+            type: object
+            required: [id, title, status, created_at, submission_count, mean_rate, pass_rate, review_required_count, similarity_alerts]
+            properties:
+              id: {type: string, format: uuid}
+              title: {type: string}
+              status: {type: string}
+              created_at: {type: string, format: date-time}
+              submission_count: {type: integer}
+              mean_rate: {type: number}
+              pass_rate: {type: number}
+              review_required_count: {type: integer}
+              similarity_alerts: {type: integer}
+    JobAnalytics:
+      type: object
+      required: [job_id, title, run, latest_run, submission_count, final_submission_count, max_total_score, summary, distribution, questions, review_stats, similarity]
+      properties:
+        job_id: {type: string, format: uuid}
+        title: {type: string}
+        run: {type: integer}
+        latest_run: {type: integer}
+        submission_count: {type: integer}
+        final_submission_count: {type: integer}
+        max_total_score: {type: integer}
+        summary:
+          type: object
+          required: [mean_score, median_score, max_score, min_score, std_dev, mean_rate, pass_rate, excellent_rate]
+          properties:
+            mean_score: {type: number}
+            median_score: {type: number}
+            max_score: {type: number}
+            min_score: {type: number}
+            std_dev: {type: number}
+            mean_rate: {type: number}
+            pass_rate: {type: number}
+            excellent_rate: {type: number}
+        distribution:
+          type: array
+          items:
+            type: object
+            required: [label, count]
+            properties:
+              label: {type: string}
+              count: {type: integer}
+        questions:
+          type: array
+          items:
+            type: object
+            required: [question_id, kind, max_score, scored_count, average_score, score_rate, review_required_count, failed_count, teacher_reviewed_count]
+            properties:
+              question_id: {type: string}
+              kind: {enum: [TEXT, EXACT, CODE]}
+              max_score: {type: integer}
+              scored_count: {type: integer}
+              average_score: {type: number}
+              score_rate: {type: number}
+              review_required_count: {type: integer}
+              failed_count: {type: integer}
+              teacher_reviewed_count: {type: integer}
+        review_stats:
+          type: object
+          required: [auto_scored, teacher_reviewed, review_required, failed, reviewer_revised]
+          properties:
+            auto_scored: {type: integer}
+            teacher_reviewed: {type: integer}
+            review_required: {type: integer}
+            failed: {type: integer}
+            reviewer_revised: {type: integer}
+        similarity:
+          type: object
+          required: [status, high_count, medium_count]
+          properties:
+            status: {enum: [NOT_APPLICABLE, PENDING, COMPLETED, FAILED]}
+            high_count: {type: integer}
+            medium_count: {type: integer}
+    WorkspaceMember:
+      type: object
+      required: [member_id, user_id, username, display_name, status, roles, created_at]
+      properties:
+        member_id: {type: string, format: uuid}
+        user_id: {type: string, format: uuid}
+        username: {type: string}
+        display_name: {type: string}
+        status: {enum: [ACTIVE, DISABLED]}
+        roles: {type: array, items: {enum: [TEACHER, SCHOOL_ADMIN]}}
+        created_at: {type: string, format: date-time}
+    CreateWorkspaceMember:
+      type: object
+      required: [username, display_name, password, roles]
+      properties:
+        username: {type: string, maxLength: 120}
+        display_name: {type: string, maxLength: 160}
+        password: {type: string, minLength: 12, maxLength: 128}
+        roles: {type: array, minItems: 1, maxItems: 2, items: {enum: [TEACHER, SCHOOL_ADMIN]}}
+    UpdateWorkspaceMember:
+      type: object
+      properties:
+        status: {enum: [ACTIVE, DISABLED]}
+        roles: {type: array, minItems: 1, maxItems: 2, items: {enum: [TEACHER, SCHOOL_ADMIN]}}
+    AuditLogEntry:
+      type: object
+      required: [id, actor_type, actor_name, action, target_type, created_at]
+      properties:
+        id: {type: string, format: uuid}
+        actor_type: {type: string}
+        actor_id: {type: [string, 'null'], format: uuid}
+        actor_name: {type: string}
+        actor_username: {type: [string, 'null']}
+        action: {type: string}
+        target_type: {type: string}
+        target_id: {type: [string, 'null'], format: uuid}
+        trace_id: {type: [string, 'null'], format: uuid}
+        details: {type: [object, 'null']}
+        created_at: {type: string, format: date-time}
